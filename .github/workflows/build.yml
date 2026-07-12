@@ -76,8 +76,9 @@ jobs:
             echo "SKIP_KSU_SETUP=$SKIP_KSU_SETUP"
             echo "STOCK_BOOT_URL=$STOCK_BOOT_URL"
             echo "RELEASE_PREFIX=$RELEASE_PREFIX"
+            echo "USE_CCACHE=${USE_CCACHE:-0}"
           } >> "$GITHUB_ENV"
-          echo "Config loaded: $KSU_FLAVOR / $KSU_HOOK / $DEFCONFIG"
+          echo "Config loaded: $KSU_FLAVOR / $KSU_HOOK / $DEFCONFIG / $TOOLCHAIN"
 
       - name: Free disk space
         run: |
@@ -90,16 +91,25 @@ jobs:
       - name: Install build deps
         run: |
           set -e
+          sudo dpkg --add-architecture i386 || true
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential bc bison flex libssl-dev libelf-dev \
             dwarves openssl ccache python3 python3-pip git curl wget \
             zip unzip cpio xz-utils gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi libncurses5-dev ca-certificates rsync device-tree-compiler
-          # 老内核常要 python2 的某些脚本；22.04 无 python2，做个兼容软链兜底
+            gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu \
+            libncurses5-dev ca-certificates rsync device-tree-compiler \
+            libc6-i386 lib32stdc++6 lib32z1 zlib1g:i386 || \
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex libssl-dev libelf-dev \
+            dwarves openssl ccache python3 git curl wget \
+            zip unzip cpio xz-utils gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu libncurses5-dev ca-certificates rsync \
+            device-tree-compiler libc6-i386 lib32stdc++6 lib32z1
           sudo ln -sf "$(which python3)" /usr/local/bin/python || true
 
       - name: Cache ccache
+        if: env.USE_CCACHE == '1'
         uses: actions/cache@v4
         with:
           path: ~/.ccache
@@ -111,7 +121,6 @@ jobs:
         run: |
           set -euo pipefail
           TOKEN="${{ secrets.GH_TOKEN || github.token }}"
-          # 支持 https 私有仓
           URL="$KERNEL_URL"
           if [[ "$URL" == https://github.com/* ]] && [ -n "$TOKEN" ]; then
             URL="https://x-access-token:${TOKEN}@${URL#https://}"
@@ -128,17 +137,103 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p toolchains
+          TC_ROOT=""
+
           if [ "$TOOLCHAIN" = "gcc-4.9" ]; then
-            # AOSP GCC 4.9（华为 4.9 内核常用）
-            if [ ! -d toolchains/aarch64-linux-android-4.9 ]; then
-              git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 toolchains/aarch64-linux-android-4.9 \
-                || git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 toolchains/aarch64-linux-android-4.9
+            # 老 AOSP GCC 4.9：googlesource 经常是空壳/缺二进制，按优先级试多个源
+            try_clone() {
+              local url="$1"
+              local dest="$2"
+              echo "[*] try toolchain: $url"
+              rm -rf "$dest"
+              if git clone --depth=1 "$url" "$dest"; then
+                if [ -x "$dest/bin/aarch64-linux-android-gcc" ] || [ -f "$dest/bin/aarch64-linux-android-gcc" ]; then
+                  return 0
+                fi
+                # 有的镜像把 prebuilt 放在 linux-x86 子目录
+                local nested
+                nested=$(find "$dest" -type f -name 'aarch64-linux-android-gcc' 2>/dev/null | head -n1 || true)
+                if [ -n "$nested" ]; then
+                  echo "[*] found nested gcc: $nested"
+                  # 记录真实 bin 目录
+                  echo "$nested" > /tmp/gcc_bin_path.txt
+                  return 0
+                fi
+                echo "[-] clone ok but gcc missing: $url"
+                return 1
+              fi
+              return 1
+            }
+
+            DEST="toolchains/aarch64-linux-android-4.9"
+            OK=0
+            # 优先带完整二进制的社区镜像
+            try_clone "https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9" "$DEST" && OK=1 || true
+            if [ "$OK" -eq 0 ]; then
+              try_clone "https://github.com/growtopiajaw/aarch64-linux-android-4.9" "$DEST" && OK=1 || true
             fi
-            echo "CROSS_COMPILE=$GITHUB_WORKSPACE/toolchains/aarch64-linux-android-4.9/bin/aarch64-linux-android-" >> "$GITHUB_ENV"
+            if [ "$OK" -eq 0 ]; then
+              try_clone "https://github.com/Adrilaw/aarch64-linux-android-4.9-toolchain" "$DEST" && OK=1 || true
+            fi
+            if [ "$OK" -eq 0 ]; then
+              try_clone "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9" "$DEST" && OK=1 || true
+            fi
+            if [ "$OK" -eq 0 ]; then
+              # 最后：从 odroid 镜像下 tarball
+              echo "[*] try odroid tarball"
+              rm -rf "$DEST"
+              mkdir -p "$DEST"
+              wget -q -O /tmp/tc.tar.gz "https://dn.odroid.com/toolchains/aarch64-linux-android-4.9.tar.gz" || true
+              if [ -f /tmp/tc.tar.gz ]; then
+                tar -xzf /tmp/tc.tar.gz -C toolchains
+                # tarball 可能解压成 aarch64-linux-android-4.9/
+                if [ ! -d "$DEST" ]; then
+                  found=$(find toolchains -type f -name 'aarch64-linux-android-gcc' | head -n1 || true)
+                  if [ -n "$found" ]; then
+                    echo "$found" > /tmp/gcc_bin_path.txt
+                    OK=1
+                  fi
+                else
+                  OK=1
+                fi
+              fi
+            fi
+
+            GCC_BIN=""
+            if [ -f /tmp/gcc_bin_path.txt ]; then
+              GCC_BIN=$(dirname "$(cat /tmp/gcc_bin_path.txt)")
+            elif [ -x "$DEST/bin/aarch64-linux-android-gcc" ] || [ -f "$DEST/bin/aarch64-linux-android-gcc" ]; then
+              GCC_BIN="$GITHUB_WORKSPACE/$DEST/bin"
+            else
+              found=$(find toolchains -type f -name 'aarch64-linux-android-gcc' 2>/dev/null | head -n1 || true)
+              if [ -n "$found" ]; then
+                GCC_BIN=$(dirname "$found")
+              fi
+            fi
+
+            if [ -z "$GCC_BIN" ] || [ ! -f "$GCC_BIN/aarch64-linux-android-gcc" ]; then
+              echo "[-] 找不到 aarch64-linux-android-gcc"
+              find toolchains -maxdepth 4 -type f -name '*gcc*' 2>/dev/null | head -n 50 || true
+              ls -la toolchains || true
+              exit 1
+            fi
+
+            chmod +x "$GCC_BIN"/aarch64-linux-android-* || true
+            # 验证能否执行（缺 32 位 loader 时这里会爆 No such file）
+            if ! "$GCC_BIN/aarch64-linux-android-gcc" --version; then
+              echo "[-] gcc 无法执行，尝试补 i386 运行库后再试"
+              sudo apt-get install -y libc6-i386 lib32stdc++6 lib32z1 || true
+              "$GCC_BIN/aarch64-linux-android-gcc" --version
+            fi
+
+            echo "PATH=$GCC_BIN:$PATH" >> "$GITHUB_ENV"
+            echo "CROSS_COMPILE=$GCC_BIN/aarch64-linux-android-" >> "$GITHUB_ENV"
             echo "CC=gcc" >> "$GITHUB_ENV"
+            # Coconutat 脚本习惯：toolchain 放在 kernel 源码旁
+            ln -sfn "$(dirname "$GCC_BIN")" kernel/aarch64-linux-android-4.9 || true
+            echo "[+] toolchain ok: $GCC_BIN"
+            ls -la "$GCC_BIN" | head -n 30
           else
-            # AOSP clang
-            CLANG_URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-${CLANG_VERSION}.tar.gz"
             mkdir -p toolchains/clang
             wget -q -O /tmp/clang.tar.gz \
               "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-${CLANG_VERSION}.tar.gz" \
@@ -152,9 +247,11 @@ jobs:
             echo "CROSS_COMPILE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
             echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
           fi
-          export CCACHE_DIR=~/.ccache
-          export USE_CCACHE=1
-          ccache -M 5G || true
+
+          if [ "${USE_CCACHE:-0}" = "1" ]; then
+            export CCACHE_DIR=~/.ccache
+            ccache -M 5G || true
+          fi
 
       - name: Integrate KernelSU
         run: |
@@ -215,14 +312,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p upload
-          # 找镜像
           find kernel -type f \( -name 'Image.gz-dtb' -o -name 'Image.gz' -o -name 'Image' -o -name 'Image-dtb' \) \
             -path '*/arch/arm64/boot/*' -print0 | while IFS= read -r -d '' f; do
               cp -v "$f" upload/
             done
           cp -v out/AnyKernel3-*.zip upload/ 2>/dev/null || true
           cp -v out/boot-repacked.img upload/ 2>/dev/null || true
-          # 构建信息
           {
             echo "device=JSN"
             echo "flavor=$KSU_FLAVOR"
