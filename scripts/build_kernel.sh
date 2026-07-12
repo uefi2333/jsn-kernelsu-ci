@@ -13,58 +13,92 @@ JOBS="${JOBS:-$(nproc)}"
 DEFCONFIG="${DEFCONFIG:-merge_kirin710_defconfig}"
 USE_CCACHE="${USE_CCACHE:-0}"
 
-# 清理错误的 ccache 前缀（防止 CROSS_COMPILE 被包成 "ccache /path/"）
+# 清理错误的 ccache 前缀
 CROSS_COMPILE="${CROSS_COMPILE#ccache }"
 CROSS_COMPILE="${CROSS_COMPILE// /}"
 
-# 校验交叉编译器真实存在
-GCC_BIN="${CROSS_COMPILE}gcc"
-if [ ! -f "$GCC_BIN" ] && ! command -v "${CROSS_COMPILE}gcc" >/dev/null 2>&1; then
-  echo "[-] CROSS_COMPILE gcc 不存在: $GCC_BIN"
+# 校验交叉编译器
+if ! command -v "${CROSS_COMPILE}gcc" >/dev/null 2>&1 && [ ! -x "${CROSS_COMPILE}gcc" ]; then
+  echo "[-] CROSS_COMPILE gcc 不存在: ${CROSS_COMPILE}gcc"
   echo "    CROSS_COMPILE=$CROSS_COMPILE"
   echo "    PATH=$PATH"
   exit 1
 fi
+echo "[*] compiler: $("${CROSS_COMPILE}gcc" --version | head -n1)"
 
-if command -v "${CROSS_COMPILE}gcc" >/dev/null 2>&1; then
-  echo "[*] compiler: $("${CROSS_COMPILE}gcc" --version | head -n1)"
-else
-  echo "[*] compiler: $($GCC_BIN --version | head -n1)"
-fi
-
-# ccache：用 CC/CXX 包一层，绝不污染 CROSS_COMPILE 路径
+# 目标 CC：只用交叉编译器；host 工具强制系统 gcc
 if [ "$USE_CCACHE" = "1" ] && command -v ccache >/dev/null 2>&1; then
   export CCACHE_DIR="${CCACHE_DIR:-$HOME/.ccache}"
-  export CC="ccache ${CROSS_COMPILE}gcc"
-  export CXX="ccache ${CROSS_COMPILE}g++"
-  if [ "${CC_REAL:-}" = "clang" ] || [ "${CC_LANG:-gcc}" = "clang" ]; then
-    export CC="ccache clang"
-  fi
+  TARGET_CC="ccache ${CROSS_COMPILE}gcc"
   echo "[*] ccache enabled"
 else
-  # 默认关掉 ccache，老 gcc-4.9 在 runner 上更稳
-  export CC="${CROSS_COMPILE}gcc"
+  TARGET_CC="${CROSS_COMPILE}gcc"
   echo "[*] ccache disabled (USE_CCACHE=$USE_CCACHE)"
 fi
 
-export CROSS_COMPILE
-export ARCH SUBARCH LOCALVERSION
+# ------------------------------------------------------------
+# 老内核 + 新 GCC 兼容补丁
+# 1) dtc: multiple definition of yylloc (GCC 10+ 默认 -fno-common)
+# 2) HOSTCFLAGS=-fcommon / allow-multiple-definition
+# ------------------------------------------------------------
+fix_yylloc() {
+  local f
+  for f in \
+    scripts/dtc/dtc-lexer.l \
+    scripts/dtc/dtc-lexer.lex.c \
+    scripts/dtc/dtc-lexer.lex.c_shipped \
+    scripts/dtc/dtc-parser.tab.c \
+    scripts/dtc/dtc-parser.tab.c_shipped
+  do
+    if [ -f "$f" ]; then
+      # 只改定义，不改声明
+      sed -i -E 's/^YYLTYPE[[:space:]]+yylloc;/extern YYLTYPE yylloc;/' "$f" || true
+      sed -i -E 's/^YYLTYPE[[:space:]]+yylloc[[:space:]]*=/extern YYLTYPE yylloc; \/* patched *\//;' "$f" || true
+    fi
+  done
+  echo "[*] yylloc host-tool patch applied (if sources present)"
+}
 
-OUT=out
-mkdir -p "$OUT"
+fix_yylloc
 
 # 华为源常见脏状态
 rm -rf include/config 2>/dev/null || true
 
+# host 侧：Ubuntu 22.04 的 gcc-11/12 必须开 -fcommon
+export HOSTCC="${HOSTCC:-gcc}"
+export HOSTCXX="${HOSTCXX:-g++}"
+export HOSTCFLAGS="${HOSTCFLAGS:--fcommon -Wno-error}"
+export HOSTCXXFLAGS="${HOSTCXXFLAGS:--fcommon -Wno-error}"
+export HOSTLDFLAGS="${HOSTLDFLAGS:--Wl,--allow-multiple-definition}"
+
+# 部分老脚本读 CC 当 host cc；明确拆开
+export CC="$TARGET_CC"
+export CROSS_COMPILE ARCH SUBARCH LOCALVERSION
+
+OUT=out
+mkdir -p "$OUT"
+
+MAKE_COMMON=(
+  O="$OUT"
+  ARCH="$ARCH"
+  CROSS_COMPILE="$CROSS_COMPILE"
+  CC="$TARGET_CC"
+  HOSTCC="$HOSTCC"
+  HOSTCXX="$HOSTCXX"
+  HOSTCFLAGS="$HOSTCFLAGS"
+  HOSTCXXFLAGS="$HOSTCXXFLAGS"
+  HOSTLDFLAGS="$HOSTLDFLAGS"
+)
+
 echo "[*] make $DEFCONFIG"
 if [ -f "arch/${ARCH}/configs/${DEFCONFIG}" ]; then
-  make O="$OUT" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" "${DEFCONFIG}"
+  make "${MAKE_COMMON[@]}" "${DEFCONFIG}"
 elif [ -f "arch/${ARCH}/configs/vendor/${DEFCONFIG}" ]; then
-  make O="$OUT" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" "vendor/${DEFCONFIG}"
+  make "${MAKE_COMMON[@]}" "vendor/${DEFCONFIG}"
 else
   if ls arch/${ARCH}/configs/*"${DEFCONFIG}"* >/dev/null 2>&1; then
     DEFCONFIG_FILE=$(ls arch/${ARCH}/configs/*"${DEFCONFIG}"* | head -n1)
-    make O="$OUT" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" "$(basename "$DEFCONFIG_FILE")"
+    make "${MAKE_COMMON[@]}" "$(basename "$DEFCONFIG_FILE")"
   else
     echo "[-] defconfig 不存在: $DEFCONFIG"
     ls "arch/${ARCH}/configs" | head
@@ -72,7 +106,6 @@ else
   fi
 fi
 
-# 强制打开 KSU
 CFG="$OUT/.config"
 if [ -f "$CFG" ]; then
   scripts/config --file "$CFG" --enable KSU || true
@@ -81,32 +114,47 @@ if [ -f "$CFG" ]; then
   else
     scripts/config --file "$CFG" --disable KPROBES --disable KPROBE_EVENTS || true
   fi
-  # 老工具链若 stack-protector-strong 不可用，降级避免 prepare-compiler-check 直接炸
+  # stack-protector-strong 探测
   if ! ${CROSS_COMPILE}gcc -fstack-protector-strong -E -x c /dev/null -o /dev/null 2>/dev/null; then
-    echo "[*] gcc 不支持 -fstack-protector-strong，关闭 CONFIG_CC_STACKPROTECTOR_STRONG"
+    echo "[*] gcc 不支持 -fstack-protector-strong，降级"
     scripts/config --file "$CFG" --disable CC_STACKPROTECTOR_STRONG || true
     scripts/config --file "$CFG" --enable CC_STACKPROTECTOR_REGULAR || true
   fi
-  make O="$OUT" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
+  make "${MAKE_COMMON[@]}" olddefconfig
 fi
 
+# out-of-tree 时 dtc 可能在 out/ 下重新生成 lexer，编译前再补一次并清 host 产物
+fix_yylloc
+rm -f "$OUT"/scripts/dtc/dtc \
+      "$OUT"/scripts/dtc/*.o \
+      "$OUT"/scripts/dtc/dtc-lexer.lex.c \
+      "$OUT"/scripts/dtc/dtc-parser.tab.c 2>/dev/null || true
+
 echo "[*] building Image (jobs=$JOBS)"
+# Coconutat 官方脚本目标是 Image.gz
 set +e
-make O="$OUT" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" CC="$CC" -j"$JOBS" Image.gz-dtb
+make "${MAKE_COMMON[@]}" -j"$JOBS" Image.gz
 RC=$?
 if [ $RC -ne 0 ]; then
-  echo "[*] Image.gz-dtb 失败，试 Image.gz"
-  make O="$OUT" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" CC="$CC" -j"$JOBS" Image.gz
+  echo "[*] Image.gz 失败，试 Image.gz-dtb"
+  # 失败时再打一次补丁（防止 make 覆盖）
+  fix_yylloc
+  make "${MAKE_COMMON[@]}" -j"$JOBS" Image.gz-dtb
   RC=$?
 fi
 if [ $RC -ne 0 ]; then
-  echo "[*] Image.gz 失败，试 Image"
-  make O="$OUT" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" CC="$CC" -j"$JOBS" Image
+  echo "[*] Image.gz-dtb 失败，试 Image"
+  fix_yylloc
+  make "${MAKE_COMMON[@]}" -j"$JOBS" Image
   RC=$?
 fi
 set -e
 if [ $RC -ne 0 ]; then
   echo "[-] 编译失败"
+  # 把 dtc 相关错误再吐一点方便排
+  echo "[*] 最近 dtc 相关文件:"
+  ls -la scripts/dtc 2>/dev/null | head || true
+  ls -la "$OUT/scripts/dtc" 2>/dev/null | head || true
   exit $RC
 fi
 

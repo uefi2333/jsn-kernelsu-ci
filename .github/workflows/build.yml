@@ -228,7 +228,9 @@ jobs:
 
             echo "PATH=$GCC_BIN:$PATH" >> "$GITHUB_ENV"
             echo "CROSS_COMPILE=$GCC_BIN/aarch64-linux-android-" >> "$GITHUB_ENV"
-            echo "CC=gcc" >> "$GITHUB_ENV"
+            # 不要把 CC 设成 host gcc；交叉 CC 由 build_kernel.sh 用 CROSS_COMPILE 拼
+            echo "HOSTCC=gcc" >> "$GITHUB_ENV"
+            echo "HOSTCXX=g++" >> "$GITHUB_ENV"
             # Coconutat 脚本习惯：toolchain 放在 kernel 源码旁
             ln -sfn "$(dirname "$GCC_BIN")" kernel/aarch64-linux-android-4.9 || true
             echo "[+] toolchain ok: $GCC_BIN"
