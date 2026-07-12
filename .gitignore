@@ -1,0 +1,11 @@
+out/
+kernel/
+toolchains/
+AnyKernel3/
+*.img
+*.zip
+*.gz
+.ccache/
+__pycache__/
+*.pyc
+.DS_Store
