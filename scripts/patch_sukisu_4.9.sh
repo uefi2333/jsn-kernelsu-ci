@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # SukiSU / KernelSU on Linux 4.9 (Huawei non-GKI) compatibility fixes
+# Avoid bash heredocs: Actions runners + CRLF historically break <<'PY'
 set -euo pipefail
 
 ROOT="${GITHUB_WORKSPACE:-$(pwd)}"
@@ -21,14 +22,17 @@ if [ -z "${KSU_DIR:-}" ] || [ ! -d "$KSU_DIR" ]; then
 fi
 
 echo "[*] patch SukiSU for 4.9: $KSU_DIR"
-
-# 1) MODULE_IMPORT_NS is Linux 5.0+ only
 export KSU_DIR
-python3 <<'PY'
+
+python3 -c '
 from pathlib import Path
 import os, re
 
 ksu = Path(os.environ["KSU_DIR"])
+if not ksu.is_dir():
+    raise SystemExit(f"missing {ksu}")
+
+# 1) MODULE_IMPORT_NS is Linux 5.0+ only
 for p in list(ksu.rglob("*.c")) + list(ksu.rglob("*.h")):
     try:
         t = p.read_text(errors="ignore")
@@ -69,14 +73,8 @@ for p in list(ksu.rglob("*.c")) + list(ksu.rglob("*.h")):
         n = 1
     p.write_text(nt)
     print(f"[+] MODULE_IMPORT_NS fixed in {p} ({n})")
-PY
 
 # 2) compiler_types.h does not exist on 4.9
-python3 <<'PY'
-from pathlib import Path
-import os
-
-ksu = Path(os.environ["KSU_DIR"])
 old = "#include <linux/compiler_types.h>"
 new = "#include <linux/compiler.h> /* 4.9: no compiler_types.h */"
 for p in list(ksu.rglob("*.c")) + list(ksu.rglob("*.h")):
@@ -88,7 +86,9 @@ for p in list(ksu.rglob("*.c")) + list(ksu.rglob("*.h")):
         continue
     p.write_text(t.replace(old, new))
     print(f"[+] compiler_types.h -> compiler.h : {p}")
-PY
+
+print("[+] python 4.9 fixes applied")
+'
 
 # 3) ensure drivers hook exists
 if [ -f "$KDIR/drivers/Makefile" ] && ! grep -q 'kernelsu' "$KDIR/drivers/Makefile"; then
