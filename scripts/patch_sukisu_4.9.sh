@@ -161,6 +161,31 @@ if tr.exists():
             write(tr, nt)
             print("[+] throne_comm: proc_ops -> file_operations")
 
+# 8) pmalloc.c: set_memory_ro/rw may not exist on 4.9
+pmc = ksu.parent.parent / "mm" / "hisi" / "pmalloc.c"
+if pmc.exists():
+    t = read(pmc)
+    if "set_memory_ro" in t and "KSU_4_9_SETMEM" not in t:
+        if "#include <linux/version.h>" not in t:
+            t = "#include <linux/version.h>
+" + t
+        # Add compat stubs before first function
+        stub = """
+/* KSU_4_9_SETMEM: set_memory_ro/rw compat for kernel < 4.12 */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 12, 0)
+#include <asm/cacheflush.h>
+#ifndef set_memory_ro
+static inline int set_memory_ro(unsigned long addr, int numpages) { return 0; }
+static inline int set_memory_rw(unsigned long addr, int numpages) { return 0; }
+#endif
+#endif
+"""
+        # Insert after version.h include
+        t = t.replace("#include <linux/version.h>",
+                       "#include <linux/version.h>" + stub, 1)
+        write(pmc, t)
+        print(f"[+] pmalloc.c: set_memory_ro/rw compat added")
+
 print("[+] python 4.9 fixes done")
 PYEOF
 
