@@ -1,10 +1,10 @@
-name: Build JSN KernelSU
+name: Build JSN SukiSU Ultra
 
 on:
   workflow_dispatch:
     inputs:
       ksu_flavor:
-        description: "kernelsu | kernelsu-next | rksu（空则用 config.env）"
+        description: "kernelsu | kernelsu-next | rksu | sukisu（空则用 config.env）"
         required: false
         default: ""
       ksu_hook:
@@ -12,9 +12,9 @@ on:
         required: false
         default: ""
       do_release:
-        description: "上传 GitHub Release"
+        description: "上传 GitHub Release（默认 true，成功即推 kernel.img）"
         type: boolean
-        default: false
+        default: true
   push:
     paths:
       - "config.env"
@@ -35,7 +35,7 @@ env:
 
 jobs:
   build:
-    name: Build Kernel + KernelSU
+    name: Build Kernel + SukiSU Ultra
     runs-on: ubuntu-22.04
     timeout-minutes: 360
 
@@ -314,14 +314,29 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p upload
+          # 原始 Image*
           find kernel -type f \( -name 'Image.gz-dtb' -o -name 'Image.gz' -o -name 'Image' -o -name 'Image-dtb' \) \
             -path '*/arch/arm64/boot/*' -print0 | while IFS= read -r -d '' f; do
               cp -v "$f" upload/
             done
+          # kernel.img（华为 fastboot flash kernel）
+          if [ -f out/kernel.img ]; then
+            cp -v out/kernel.img upload/kernel.img
+          elif [ -f out/release/kernel.img ]; then
+            cp -v out/release/kernel.img upload/kernel.img
+          else
+            # 兜底：从 Image 生成
+            for c in kernel/out/arch/arm64/boot/Image kernel/arch/arm64/boot/Image \
+                     kernel/out/arch/arm64/boot/Image.gz kernel/arch/arm64/boot/Image.gz; do
+              if [ -f "$c" ]; then cp -v "$c" upload/kernel.img; break; fi
+            done
+          fi
+          test -f upload/kernel.img
           cp -v out/AnyKernel3-*.zip upload/ 2>/dev/null || true
           cp -v out/boot-repacked.img upload/ 2>/dev/null || true
           {
             echo "device=JSN"
+            echo "board=EMUI9.1"
             echo "flavor=$KSU_FLAVOR"
             echo "version=$KSU_VERSION"
             echo "hook=$KSU_HOOK"
@@ -329,31 +344,36 @@ jobs:
             echo "localversion=$LOCALVERSION"
             echo "sha=$(cd kernel && git rev-parse --short HEAD 2>/dev/null || echo na)"
             echo "date=$(date -u +%Y%m%d-%H%M%S)"
+            echo "artifact=kernel.img"
           } | tee upload/build-info.txt
           ls -lah upload
-          test "$(find upload -type f | wc -l)" -gt 1
+          test -f upload/kernel.img
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JSN-KernelSU-${{ env.KSU_FLAVOR }}-${{ github.run_number }}
+          name: JSN-SukiSU-${{ env.KSU_FLAVOR }}-${{ github.run_number }}
           path: upload/*
           if-no-files-found: error
           retention-days: 14
 
-      - name: Create Release
-        if: ${{ github.event.inputs.do_release == 'true' || github.event_name == 'workflow_dispatch' && github.event.inputs.do_release == true }}
+      - name: Create Release (kernel.img)
+        if: ${{ github.event_name == 'push' || github.event.inputs.do_release == 'true' || github.event.inputs.do_release == true || github.event.inputs.do_release == '' }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.RELEASE_PREFIX }}-${{ env.KSU_FLAVOR }}-${{ github.run_number }}
-          name: ${{ env.RELEASE_PREFIX }} ${{ env.KSU_FLAVOR }} #${{ github.run_number }}
+          tag_name: ${{ env.RELEASE_PREFIX }}-${{ github.run_number }}
+          name: ${{ env.RELEASE_PREFIX }} #${{ github.run_number }}
           body: |
-            JSN (Honor 8X / Kirin 710) KernelSU auto build
+            JSN (Honor 8X / Kirin 710) **EMUI 9.1** + SukiSU Ultra auto build
             - Flavor: `${{ env.KSU_FLAVOR }}` `${{ env.KSU_VERSION }}`
             - Hook: `${{ env.KSU_HOOK }}`
             - Defconfig: `${{ env.DEFCONFIG }}`
             - Localversion: `${{ env.LOCALVERSION }}`
-            **刷机前备份，错底包会无法开机。**
-          files: upload/*
+            - Primary: `kernel.img`（`fastboot flash kernel kernel.img`）
+            **刷机前备份，错底包/未解锁会无法开机。**
+          files: |
+            upload/kernel.img
+            upload/*
           token: ${{ secrets.GH_TOKEN || github.token }}
           generate_release_notes: false
+          fail_on_unmatched_files: false
