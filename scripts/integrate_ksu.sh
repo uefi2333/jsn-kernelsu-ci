@@ -38,7 +38,7 @@ case "$FLAVOR" in
     # SukiSU-Ultra builtin 模式 (SUSFS inline hooks)
     echo "[*] 安装 SukiSU-Ultra (builtin 模式)"
     rm -rf KernelSU
-    curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+    curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s v3.2.0
 
     # 针定到已知兼容 4.9 的 commit（参考 xixiaobei-bei 仓库）
     if [ -d KernelSU ]; then
