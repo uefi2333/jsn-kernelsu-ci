@@ -265,6 +265,12 @@ jobs:
           set -euo pipefail
           bash builder/scripts/patch_sukisu_4.9.sh
 
+      - name: Apply SUSFS v2.0.0 + KPM backport patch
+        if: env.ENABLE_SUSFS == 'true'
+        run: |
+          set -euo pipefail
+          bash builder/scripts/apply_susfs.sh
+
       - name: Apply manual hooks & path_umount
         if: env.KSU_HOOK == 'manual'
         run: |
@@ -282,6 +288,12 @@ jobs:
         run: |
           set -euo pipefail
           bash builder/scripts/build_kernel.sh
+
+      - name: Apply KPM patch to kernel Image
+        if: env.ENABLE_KPM == 'true'
+        run: |
+          set -euo pipefail
+          bash builder/scripts/patch_kpm.sh
 
       - name: Pack AnyKernel3
         run: |
