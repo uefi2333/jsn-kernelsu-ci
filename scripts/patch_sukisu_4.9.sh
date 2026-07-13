@@ -382,6 +382,29 @@ PY
 
 python3 "$PATCH_PY"
 
+# 4) SukiSU v3.2.0 dropped pre-5.x SELinux compat; restore KernelSU v0.9.5 selinux tree
+#    (sepolicy.h/Makefile identical; sepolicy.c/rules.c/selinux.c/h have 4.9 guards)
+SELINUX_DIR="$KSU_DIR/selinux"
+if [ -d "$SELINUX_DIR" ]; then
+  BASE_URL="https://raw.githubusercontent.com/tiann/KernelSU/v0.9.5/kernel/selinux"
+  echo "[*] restore KernelSU v0.9.5 SELinux sources for Linux 4.9"
+  for f in sepolicy.c rules.c selinux.c selinux.h; do
+    tmp="$(mktemp)"
+    if curl -fsSL "$BASE_URL/$f" -o "$tmp"; then
+      mv "$tmp" "$SELINUX_DIR/$f"
+      echo "[+] selinux/$f <- KernelSU v0.9.5"
+    else
+      rm -f "$tmp"
+      echo "[-] failed to fetch selinux/$f"
+      exit 1
+    fi
+  done
+else
+  echo "[-] no selinux dir under $KSU_DIR"
+  exit 1
+fi
+
+
 # ensure drivers hook exists
 if [ -f "$KDIR/drivers/Makefile" ] && ! grep -q 'kernelsu' "$KDIR/drivers/Makefile"; then
   printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> "$KDIR/drivers/Makefile"
