@@ -337,4 +337,55 @@ if [ -f "$KDIR/drivers/Kconfig" ] && ! grep -q 'drivers/kernelsu/Kconfig' "$KDIR
   echo "[+] drivers/Kconfig += kernelsu"
 fi
 
+
+# === 9) super_access.c: 4.9 compat (security member, C99 for-loops) ===
+SAC="$KSU_DIR/kpm/super_access.c"
+if [ -f "$SAC" ]; then
+  echo "[*] patch kpm/super_access.c for 4.9"
+  python3 - <<'PYSAC'
+import os, re
+from pathlib import Path
+sac = Path(os.environ["KSU_DIR"]) / "kpm" / "super_access.c"
+if not sac.exists():
+    print("[!] super_access.c not found")
+    raise SystemExit()
+t = sac.read_text(errors="ignore")
+
+# 1) Guard task_struct.security — doesn't exist on 4.9
+if "KSU_49_NO_SEC" not in t:
+    t = t.replace(
+        "    DEFINE_MEMBER(task_struct, security)",
+        "#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0)\n"
+        "    DEFINE_MEMBER(task_struct, security)\n"
+        "#endif /* KSU_49_NO_SEC */"
+    )
+    print("[+] super_access.c: security member guarded")
+
+# 2) Also guard thread_pid — added in 4.19
+if "KSU_49_NO_TPID" not in t:
+    t = t.replace(
+        "    DEFINE_MEMBER(task_struct, thread_pid)",
+        "#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0)\n"
+        "    DEFINE_MEMBER(task_struct, thread_pid)\n"
+        "#endif /* KSU_49_NO_TPID */"
+    )
+    print("[+] super_access.c: thread_pid member guarded")
+
+# 3) Fix C99 for-loop declarations: "for (size_t i = ..." -> declare before loop
+pat = re.compile(r"for \((\w+) (\w+) = (\d+);")
+def fix_for(m):
+    typ, var, init = m.group(1), m.group(2), m.group(3)
+    return f"{typ} {var};\n    for ({var} = {init};"
+nt, n = pat.subn(fix_for, t)
+if n:
+    t = nt
+    print(f"[+] super_access.c: C99 for-loops fixed ({n})")
+else:
+    print("[=] no C99 for-loops found")
+
+sac.write_text(t)
+PYSAC
+fi
+
 echo "[+] 4.9 SukiSU compatibility patch done"
+
