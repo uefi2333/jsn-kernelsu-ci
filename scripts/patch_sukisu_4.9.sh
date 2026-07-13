@@ -446,5 +446,49 @@ sac.write_text(t)
 PYSAC
 fi
 
+
+# === 10) path_umount compat: added in 4.18, 4.9 uses do_umount() ===
+echo "[*] Adding path_umount compat for 4.9"
+python3 - <<'PYUMOUNT'
+import os
+from pathlib import Path
+ksu = Path(os.environ["KSU_DIR"])
+
+# Add path_umount to kernel_compat.h
+h = ksu / "kernel_compat.h"
+t = h.read_text(errors="ignore")
+if "path_umount" not in t:
+    inject = """
+/* path_umount compat for kernel < 4.18 */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 18, 0)
+int path_umount(struct path *path, int flags);
+#endif
+"""
+    idx = t.rfind("#endif")
+    if idx < 0:
+        idx = len(t)
+    t = t[:idx] + inject + t[idx:]
+    h.write_text(t)
+    print("[+] kernel_compat.h: path_umount declaration added")
+
+# Add path_umount impl to kernel_compat.c
+c = ksu / "kernel_compat.c"
+t = c.read_text(errors="ignore")
+if "path_umount" not in t:
+    impl = """
+
+/* path_umount compat for kernel < 4.18 */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 18, 0)
+int path_umount(struct path *path, int flags)
+{
+	return do_umount(path->mnt, flags);
+}
+#endif
+"""
+    t = t + impl
+    c.write_text(t)
+    print("[+] kernel_compat.c: path_umount implementation added")
+PYUMOUNT
+
 echo "[+] 4.9 SukiSU compatibility patch done"
 
