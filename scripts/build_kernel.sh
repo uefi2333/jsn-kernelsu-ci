@@ -114,6 +114,29 @@ if [ -f "$CFG" ]; then
   else
     scripts/config --file "$CFG" --disable KPROBES --disable KPROBE_EVENTS || true
   fi
+
+  # ===== SUSFS v2.0.0 激进模式 =====
+  if [ "${ENABLE_SUSFS:-false}" = "true" ]; then
+    echo "[*] 启用 SUSFS v2.0.0 全功能配置"
+    scripts/config --file "$CFG" --enable KSU_SUSFS || true
+    scripts/config --file "$CFG" --enable KSU_SUSFS_SUS_PATH || true
+    scripts/config --file "$CFG" --enable KSU_SUSFS_OPEN_REDIRECT || true
+    scripts/config --file "$CFG" --enable KSU_SUSFS_SUS_MOUNT || true
+    scripts/config --file "$CFG" --enable KSU_SUSFS_SUS_OVERLAYFS || true
+    scripts/config --file "$CFG" --enable KSU_SUSFS_SUS_MAP || true
+    scripts/config --file "$CFG" --enable KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG || true
+    scripts/config --file "$CFG" --enable KSU_SUSFS_SUS_KSTAT || true
+    scripts/config --file "$CFG" --enable KSU_SUSFS_SPOOF_UNAME || true
+    scripts/config --file "$CFG" --enable KSU_SUSFS_ENABLE_LOG || true
+    scripts/config --file "$CFG" --enable KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS || true
+    echo "[+] SUSFS 全功能已启用"
+  fi
+
+  # ===== KPM (Kernel Patch Module) =====
+  if [ "${ENABLE_KPM:-false}" = "true" ]; then
+    echo "[*] 启用 KPM (CONFIG_KPM=y)"
+    scripts/config --file "$CFG" --enable KPM || true
+  fi
   # stack-protector-strong 探测
   if ! ${CROSS_COMPILE}gcc -fstack-protector-strong -E -x c /dev/null -o /dev/null 2>/dev/null; then
     echo "[*] gcc 不支持 -fstack-protector-strong，降级"
