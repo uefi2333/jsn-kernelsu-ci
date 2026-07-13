@@ -1,4 +1,4 @@
-name: Build JSN SukiSU Ultra
+name: Build JSN SukiSU Ultra (Aggressive)
 
 on:
   workflow_dispatch:
@@ -8,11 +8,11 @@ on:
         required: false
         default: ""
       ksu_hook:
-        description: "manual | kprobe（空则用 config.env）"
+        description: "builtin | manual | kprobe（空则用 config.env）"
         required: false
         default: ""
       do_release:
-        description: "上传 GitHub Release（默认 true，成功即推 kernel.img）"
+        description: "上传 GitHub Release"
         type: boolean
         default: true
   push:
@@ -35,7 +35,7 @@ env:
 
 jobs:
   build:
-    name: Build Kernel + SukiSU Ultra
+    name: Build Kernel + SukiSU Ultra (Aggressive)
     runs-on: ubuntu-22.04
     timeout-minutes: 360
 
@@ -51,7 +51,6 @@ jobs:
         working-directory: builder
         run: |
           set -euo pipefail
-          # shellcheck disable=SC1091
           source ./config.env
           if [ -n "${{ github.event.inputs.ksu_flavor }}" ]; then
             KSU_FLAVOR="${{ github.event.inputs.ksu_flavor }}"
@@ -77,14 +76,15 @@ jobs:
             echo "STOCK_BOOT_URL=$STOCK_BOOT_URL"
             echo "RELEASE_PREFIX=$RELEASE_PREFIX"
             echo "USE_CCACHE=${USE_CCACHE:-0}"
+            echo "ENABLE_SUSFS=${ENABLE_SUSFS:-false}"
+            echo "ENABLE_KPM=${ENABLE_KPM:-false}"
           } >> "$GITHUB_ENV"
-          echo "Config loaded: $KSU_FLAVOR / $KSU_HOOK / $DEFCONFIG / $TOOLCHAIN"
+          echo "Config: $KSU_FLAVOR / hook=$KSU_HOOK / SUSFS=$ENABLE_SUSFS / KPM=$ENABLE_KPM"
 
       - name: Free disk space
         run: |
           set -e
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk /opt/ghc \
-            /usr/local/share/boost /usr/share/swift || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk /opt/ghc             /usr/local/share/boost /usr/share/swift || true
           sudo apt-get clean
           df -h
 
@@ -93,19 +93,7 @@ jobs:
           set -e
           sudo dpkg --add-architecture i386 || true
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential bc bison flex libssl-dev libelf-dev \
-            dwarves openssl ccache python3 python3-pip git curl wget \
-            zip unzip cpio xz-utils gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu \
-            libncurses5-dev ca-certificates rsync device-tree-compiler \
-            libc6-i386 lib32stdc++6 lib32z1 zlib1g:i386 || \
-          sudo apt-get install -y --no-install-recommends \
-            build-essential bc bison flex libssl-dev libelf-dev \
-            dwarves openssl ccache python3 git curl wget \
-            zip unzip cpio xz-utils gcc-aarch64-linux-gnu \
-            binutils-aarch64-linux-gnu libncurses5-dev ca-certificates rsync \
-            device-tree-compiler libc6-i386 lib32stdc++6 lib32z1
+          sudo apt-get install -y --no-install-recommends             build-essential bc bison flex libssl-dev libelf-dev             dwarves openssl ccache python3 python3-pip git curl wget             zip unzip cpio xz-utils gcc-aarch64-linux-gnu g++-aarch64-linux-gnu             gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu             libncurses5-dev ca-certificates rsync device-tree-compiler             libc6-i386 lib32stdc++6 lib32z1 zlib1g:i386 ||           sudo apt-get install -y --no-install-recommends             build-essential bc bison flex libssl-dev libelf-dev             dwarves openssl ccache python3 git curl wget             zip unzip cpio xz-utils gcc-aarch64-linux-gnu             binutils-aarch64-linux-gnu libncurses5-dev ca-certificates rsync             device-tree-compiler libc6-i386 lib32stdc++6 lib32z1
           sudo ln -sf "$(which python3)" /usr/local/bin/python || true
 
       - name: Cache ccache
@@ -126,40 +114,31 @@ jobs:
             URL="https://x-access-token:${TOKEN}@${URL#https://}"
           fi
           echo "Cloning $KERNEL_URL @ $KERNEL_BRANCH ..."
-          git clone --depth=1 --branch "$KERNEL_BRANCH" "$URL" kernel || \
-          git clone --depth=1 "$URL" kernel
+          git clone --depth=1 --branch "$KERNEL_BRANCH" "$URL" kernel ||           git clone --depth=1 "$URL" kernel
           cd kernel
           git checkout "$KERNEL_BRANCH" 2>/dev/null || true
           echo "Kernel HEAD: $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-          ls arch/arm64/configs | head -n 50 || true
 
       - name: Setup toolchain
         run: |
           set -euo pipefail
           mkdir -p toolchains
-          TC_ROOT=""
 
           if [ "$TOOLCHAIN" = "gcc-4.9" ]; then
-            # 老 AOSP GCC 4.9：googlesource 经常是空壳/缺二进制，按优先级试多个源
             try_clone() {
-              local url="$1"
-              local dest="$2"
+              local url="$1" dest="$2"
               echo "[*] try toolchain: $url"
               rm -rf "$dest"
               if git clone --depth=1 "$url" "$dest"; then
                 if [ -x "$dest/bin/aarch64-linux-android-gcc" ] || [ -f "$dest/bin/aarch64-linux-android-gcc" ]; then
                   return 0
                 fi
-                # 有的镜像把 prebuilt 放在 linux-x86 子目录
                 local nested
                 nested=$(find "$dest" -type f -name 'aarch64-linux-android-gcc' 2>/dev/null | head -n1 || true)
                 if [ -n "$nested" ]; then
-                  echo "[*] found nested gcc: $nested"
-                  # 记录真实 bin 目录
                   echo "$nested" > /tmp/gcc_bin_path.txt
                   return 0
                 fi
-                echo "[-] clone ok but gcc missing: $url"
                 return 1
               fi
               return 1
@@ -167,7 +146,6 @@ jobs:
 
             DEST="toolchains/aarch64-linux-android-4.9"
             OK=0
-            # 优先带完整二进制的社区镜像
             try_clone "https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9" "$DEST" && OK=1 || true
             if [ "$OK" -eq 0 ]; then
               try_clone "https://github.com/growtopiajaw/aarch64-linux-android-4.9" "$DEST" && OK=1 || true
@@ -178,71 +156,38 @@ jobs:
             if [ "$OK" -eq 0 ]; then
               try_clone "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9" "$DEST" && OK=1 || true
             fi
-            if [ "$OK" -eq 0 ]; then
-              # 最后：从 odroid 镜像下 tarball
-              echo "[*] try odroid tarball"
-              rm -rf "$DEST"
-              mkdir -p "$DEST"
-              wget -q -O /tmp/tc.tar.gz "https://dn.odroid.com/toolchains/aarch64-linux-android-4.9.tar.gz" || true
-              if [ -f /tmp/tc.tar.gz ]; then
-                tar -xzf /tmp/tc.tar.gz -C toolchains
-                # tarball 可能解压成 aarch64-linux-android-4.9/
-                if [ ! -d "$DEST" ]; then
-                  found=$(find toolchains -type f -name 'aarch64-linux-android-gcc' | head -n1 || true)
-                  if [ -n "$found" ]; then
-                    echo "$found" > /tmp/gcc_bin_path.txt
-                    OK=1
-                  fi
-                else
-                  OK=1
-                fi
-              fi
-            fi
 
             GCC_BIN=""
             if [ -f /tmp/gcc_bin_path.txt ]; then
               GCC_BIN=$(dirname "$(cat /tmp/gcc_bin_path.txt)")
-            elif [ -x "$DEST/bin/aarch64-linux-android-gcc" ] || [ -f "$DEST/bin/aarch64-linux-android-gcc" ]; then
+            elif [ -x "$DEST/bin/aarch64-linux-android-gcc" ]; then
               GCC_BIN="$GITHUB_WORKSPACE/$DEST/bin"
             else
               found=$(find toolchains -type f -name 'aarch64-linux-android-gcc' 2>/dev/null | head -n1 || true)
-              if [ -n "$found" ]; then
-                GCC_BIN=$(dirname "$found")
-              fi
+              [ -n "$found" ] && GCC_BIN=$(dirname "$found")
             fi
 
             if [ -z "$GCC_BIN" ] || [ ! -f "$GCC_BIN/aarch64-linux-android-gcc" ]; then
               echo "[-] 找不到 aarch64-linux-android-gcc"
-              find toolchains -maxdepth 4 -type f -name '*gcc*' 2>/dev/null | head -n 50 || true
-              ls -la toolchains || true
               exit 1
             fi
 
             chmod +x "$GCC_BIN"/aarch64-linux-android-* || true
-            # 验证能否执行（缺 32 位 loader 时这里会爆 No such file）
             if ! "$GCC_BIN/aarch64-linux-android-gcc" --version; then
-              echo "[-] gcc 无法执行，尝试补 i386 运行库后再试"
               sudo apt-get install -y libc6-i386 lib32stdc++6 lib32z1 || true
               "$GCC_BIN/aarch64-linux-android-gcc" --version
             fi
 
             echo "PATH=$GCC_BIN:$PATH" >> "$GITHUB_ENV"
             echo "CROSS_COMPILE=$GCC_BIN/aarch64-linux-android-" >> "$GITHUB_ENV"
-            # 不要把 CC 设成 host gcc；交叉 CC 由 build_kernel.sh 用 CROSS_COMPILE 拼
             echo "HOSTCC=gcc" >> "$GITHUB_ENV"
             echo "HOSTCXX=g++" >> "$GITHUB_ENV"
-            # Coconutat 脚本习惯：toolchain 放在 kernel 源码旁
             ln -sfn "$(dirname "$GCC_BIN")" kernel/aarch64-linux-android-4.9 || true
             echo "[+] toolchain ok: $GCC_BIN"
-            ls -la "$GCC_BIN" | head -n 30
           else
             mkdir -p toolchains/clang
-            wget -q -O /tmp/clang.tar.gz \
-              "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-${CLANG_VERSION}.tar.gz" \
-              || wget -q -O /tmp/clang.tar.gz \
-              "https://github.com/LineageOS/android_prebuilts_clang_host_linux-x86/archive/refs/heads/lineage-20.0.tar.gz"
-            tar -xzf /tmp/clang.tar.gz -C toolchains/clang --strip-components=0 2>/dev/null || \
-              tar -xzf /tmp/clang.tar.gz -C toolchains/clang
+            wget -q -O /tmp/clang.tar.gz               "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-${CLANG_VERSION}.tar.gz"               || wget -q -O /tmp/clang.tar.gz               "https://github.com/LineageOS/android_prebuilts_clang_host_linux-x86/archive/refs/heads/lineage-20.0.tar.gz"
+            tar -xzf /tmp/clang.tar.gz -C toolchains/clang --strip-components=0 2>/dev/null ||               tar -xzf /tmp/clang.tar.gz -C toolchains/clang
             CLANG_BIN=$(find toolchains/clang -type f -name clang | head -n1 | xargs dirname)
             echo "PATH=$CLANG_BIN:$PATH" >> "$GITHUB_ENV"
             echo "CC=clang" >> "$GITHUB_ENV"
@@ -255,7 +200,7 @@ jobs:
             ccache -M 5G || true
           fi
 
-      - name: Integrate KernelSU
+      - name: Integrate SukiSU-Ultra (builtin)
         run: |
           set -euo pipefail
           bash builder/scripts/integrate_ksu.sh
@@ -270,19 +215,6 @@ jobs:
         run: |
           set -euo pipefail
           bash builder/scripts/apply_susfs.sh
-
-      - name: Apply manual hooks & path_umount
-        if: env.KSU_HOOK == 'manual'
-        run: |
-          set -euo pipefail
-          python3 builder/scripts/apply_manual_hooks.py kernel
-          bash builder/scripts/patch_defconfig.sh
-
-      - name: Patch defconfig (kprobe path)
-        if: env.KSU_HOOK == 'kprobe'
-        run: |
-          set -euo pipefail
-          bash builder/scripts/patch_defconfig.sh
 
       - name: Build kernel
         run: |
@@ -307,44 +239,32 @@ jobs:
           mkdir -p out
           wget -q -O out/stock-boot.img "$STOCK_BOOT_URL"
           wget -q -O /tmp/magisk.apk https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
-          unzip -p /tmp/magisk.apk lib/linux-x86/libmagiskboot.so > out/magiskboot || \
-          unzip -p /tmp/magisk.apk lib/x86_64/libmagiskboot.so > out/magiskboot
+          unzip -p /tmp/magisk.apk lib/linux-x86/libmagiskboot.so > out/magiskboot ||           unzip -p /tmp/magisk.apk lib/x86_64/libmagiskboot.so > out/magiskboot
           chmod +x out/magiskboot
           cd out
           ./magiskboot unpack stock-boot.img
           KERNEL_IMG=""
-          for c in ../kernel/out/arch/arm64/boot/Image.gz-dtb \
-                   ../kernel/arch/arm64/boot/Image.gz-dtb \
-                   ../kernel/out/arch/arm64/boot/Image.gz \
-                   ../kernel/arch/arm64/boot/Image.gz \
-                   ../kernel/out/arch/arm64/boot/Image \
-                   ../kernel/arch/arm64/boot/Image; do
+          for c in ../kernel/out/arch/arm64/boot/Image.gz-dtb                    ../kernel/arch/arm64/boot/Image.gz-dtb                    ../kernel/out/arch/arm64/boot/Image.gz                    ../kernel/arch/arm64/boot/Image.gz                    ../kernel/out/arch/arm64/boot/Image                    ../kernel/arch/arm64/boot/Image; do
             if [ -f "$c" ]; then KERNEL_IMG="$c"; break; fi
           done
           test -n "$KERNEL_IMG"
           cp -f "$KERNEL_IMG" kernel
           ./magiskboot repack stock-boot.img boot-repacked.img
-          ls -lh boot-repacked.img
 
       - name: Collect artifacts
         id: collect
         run: |
           set -euo pipefail
           mkdir -p upload
-          # 原始 Image*
-          find kernel -type f \( -name 'Image.gz-dtb' -o -name 'Image.gz' -o -name 'Image' -o -name 'Image-dtb' \) \
-            -path '*/arch/arm64/boot/*' -print0 | while IFS= read -r -d '' f; do
+          find kernel -type f \( -name 'Image.gz-dtb' -o -name 'Image.gz' -o -name 'Image' -o -name 'Image-dtb' \)             -path '*/arch/arm64/boot/*' -print0 | while IFS= read -r -d '' f; do
               cp -v "$f" upload/
             done
-          # kernel.img（华为 fastboot flash kernel）
           if [ -f out/kernel.img ]; then
             cp -v out/kernel.img upload/kernel.img
           elif [ -f out/release/kernel.img ]; then
             cp -v out/release/kernel.img upload/kernel.img
           else
-            # 兜底：从 Image 生成
-            for c in kernel/out/arch/arm64/boot/Image kernel/arch/arm64/boot/Image \
-                     kernel/out/arch/arm64/boot/Image.gz kernel/arch/arm64/boot/Image.gz; do
+            for c in kernel/out/arch/arm64/boot/Image kernel/arch/arm64/boot/Image                      kernel/out/arch/arm64/boot/Image.gz kernel/arch/arm64/boot/Image.gz; do
               if [ -f "$c" ]; then cp -v "$c" upload/kernel.img; break; fi
             done
           fi
@@ -357,11 +277,12 @@ jobs:
             echo "flavor=$KSU_FLAVOR"
             echo "version=$KSU_VERSION"
             echo "hook=$KSU_HOOK"
+            echo "susfs=$ENABLE_SUSFS"
+            echo "kpm=$ENABLE_KPM"
             echo "defconfig=$DEFCONFIG"
             echo "localversion=$LOCALVERSION"
             echo "sha=$(cd kernel && git rev-parse --short HEAD 2>/dev/null || echo na)"
             echo "date=$(date -u +%Y%m%d-%H%M%S)"
-            echo "artifact=kernel.img"
           } | tee upload/build-info.txt
           ls -lah upload
           test -f upload/kernel.img
@@ -369,7 +290,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JSN-SukiSU-${{ env.KSU_FLAVOR }}-${{ github.run_number }}
+          name: JSN-Aggressive-${{ github.run_number }}
           path: upload/*
           if-no-files-found: error
           retention-days: 14
@@ -379,15 +300,15 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_PREFIX }}-${{ github.run_number }}
-          name: ${{ env.RELEASE_PREFIX }} #${{ github.run_number }}
+          name: ${{ env.RELEASE_PREFIX }}
           body: |
-            JSN (Honor 8X / Kirin 710) **EMUI 9.1** + SukiSU Ultra auto build
-            - Flavor: `${{ env.KSU_FLAVOR }}` `${{ env.KSU_VERSION }}`
-            - Hook: `${{ env.KSU_HOOK }}`
+            JSN (Honor 8X / Kirin 710) **EMUI 9.1** Aggressive Build
+            - Flavor: `${{ env.KSU_FLAVOR }}` (builtin mode)
+            - SUSFS: `${{ env.ENABLE_SUSFS }}` (v2.0.0 inline hooks)
+            - KPM: `${{ env.ENABLE_KPM }}` (Kernel Patch Module)
             - Defconfig: `${{ env.DEFCONFIG }}`
-            - Localversion: `${{ env.LOCALVERSION }}`
-            - Primary: `kernel.img`（`fastboot flash kernel kernel.img`）
-            **刷机前备份，错底包/未解锁会无法开机。**
+            - 刷机命令: `fastboot flash kernel kernel.img`
+            **刷机前备份原 kernel，错底包/未解锁会无法开机。**
           files: |
             upload/kernel.img
             upload/*
