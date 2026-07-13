@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # SukiSU / KernelSU on Linux 4.9 (Huawei non-GKI) compatibility fixes
+# Updated for SukiSU-Ultra "builtin" branch (subdirectory layout)
 set -euo pipefail
 
 ROOT="${GITHUB_WORKSPACE:-$(pwd)}"
 KDIR="${ROOT}/kernel"
 KSU_DIR=""
 
+# Detect KernelSU driver directory (both old flat and new subdirectory layouts)
 if [ -d "$KDIR/KernelSU/kernel" ]; then
   KSU_DIR="$KDIR/KernelSU/kernel"
 elif [ -L "$KDIR/drivers/kernelsu" ] || [ -d "$KDIR/drivers/kernelsu" ]; then
@@ -23,7 +25,17 @@ fi
 echo "[*] patch SukiSU for 4.9: $KSU_DIR"
 export KSU_DIR
 
-if [ -d "$ROOT/builder/scripts" ]; then
+# Detect layout: new SukiSU-Ultra has feature/ subdirectory, old has flat sucompat.c
+if [ -d "$KSU_DIR/feature" ]; then
+  echo "[*] Detected new SukiSU-Ultra subdirectory layout"
+  NEW_LAYOUT=true
+else
+  echo "[*] Detected legacy flat layout"
+  NEW_LAYOUT=false
+fi
+
+# Run Python patcher for both layouts
+if [ "$ROOT/builder/scripts" ] && [ -d "$ROOT/builder/scripts" ]; then
   PATCH_PY="$ROOT/builder/scripts/_patch_sukisu_4_9.py"
 elif [ -d "$ROOT/scripts" ]; then
   PATCH_PY="$ROOT/scripts/_patch_sukisu_4_9.py"
@@ -37,6 +49,7 @@ from pathlib import Path
 import os, re
 
 ksu = Path(os.environ["KSU_DIR"])
+new_layout = os.environ.get("NEW_LAYOUT", "false") == "true"
 if not ksu.is_dir():
     raise SystemExit(f"missing {ksu}")
 
@@ -46,7 +59,7 @@ def read(p: Path) -> str:
 def write(p: Path, t: str):
     p.write_text(t)
 
-# 1) MODULE_IMPORT_NS is Linux 5.0+ only
+# 1) MODULE_IMPORT_NS is Linux 5.0+ only (recursive search, both layouts)
 for p in list(ksu.rglob("*.c")) + list(ksu.rglob("*.h")):
     t = read(p)
     if "MODULE_IMPORT_NS" not in t:
@@ -85,26 +98,34 @@ for p in list(ksu.rglob("*.c")) + list(ksu.rglob("*.h")):
     write(p, nt)
     print(f"[+] MODULE_IMPORT_NS fixed in {p} ({n})")
 
-# 2) compiler_types.h does not exist on 4.9
-old = "#include <linux/compiler_types.h>"
-new = "#include <linux/compiler.h> /* 4.9: no compiler_types.h */"
+# 2) compiler_types.h does not exist on 4.9 (recursive search)
+old_ct = "#include <linux/compiler_types.h>"
+new_ct = "#include <linux/compiler.h> /* 4.9: no compiler_types.h */"
 for p in list(ksu.rglob("*.c")) + list(ksu.rglob("*.h")):
     t = read(p)
-    if old not in t:
+    if old_ct not in t:
         continue
-    write(p, t.replace(old, new))
+    write(p, t.replace(old_ct, new_ct))
     print(f"[+] compiler_types.h -> compiler.h : {p}")
 
-# 3) sucompat: task_stack.h is 4.10+
-su = ksu / "sucompat.c"
-if su.exists():
+# 3) current_user_stack_pointer may be missing on 4.9
+# New layout: feature/sucompat.c, old layout: sucompat.c
+su_candidates = [ksu / "feature" / "sucompat.c", ksu / "sucompat.c"]
+su = None
+for c in su_candidates:
+    if c.exists():
+        su = c
+        break
+
+if su:
     t = read(su)
     nt = t
+    # task_stack.h compat (4.10+)
     nt = nt.replace(
         "#include <linux/sched/task_stack.h>",
         "#include <linux/sched.h> /* 4.9: no task_stack.h */",
     )
-    # current_user_stack_pointer may be missing on some 4.9 trees
+    # current_user_stack_pointer compat
     if "current_user_stack_pointer" in nt and "KSU_4_9_STACK" not in nt:
         if "#include <linux/version.h>" not in nt:
             nt = "#include <linux/version.h>\n" + nt
@@ -116,12 +137,13 @@ if su.exists():
         ) + nt
     if nt != t:
         write(su, nt)
-        print(f"[+] task_stack / current_user_stack_pointer fixed: {su}")
+        print(f"[+] sucompat: current_user_stack_pointer fixed: {su}")
+    else:
+        print(f"[=] sucompat: no changes needed: {su}")
 
-# 4) kernel_compat sched/task.h
-kc = ksu / "kernel_compat.c"
-if kc.exists():
-    t = read(kc)
+# 4) kernel_compat sched/task.h (recursive search)
+for p in list(ksu.rglob("kernel_compat*.c")) + list(ksu.rglob("kernel_compat*.h")):
+    t = read(p)
     if "#include <linux/sched/task.h>" in t and "KERNEL_VERSION(4, 10, 0)" not in t:
         nt = t.replace(
             "#include <linux/sched/task.h>",
@@ -131,87 +153,123 @@ if kc.exists():
             "#include <linux/sched.h>\n"
             "#endif",
         )
-        if "#include <linux/version.h>" not in nt:
+        if "#include <linux/version.h>" not in selinux.h not in nt:
             nt = "#include <linux/version.h>\n" + nt
-        write(kc, nt)
-        print(f"[+] sched/task.h fixed: {kc}")
+        write(p, nt)
+        print(f"[+] sched/task.h fixed: {p}")
 
-# 5) throne_tracker: vfs_getattr / STATX for 4.9
-tt = ksu / "throne_tracker.c"
-if tt.exists():
-    t = read(tt)
-    if "vfs_getattr" in t and "KERNEL_VERSION(4, 11, 0)" not in t:
-        # crude but effective: wrap STATX_* blocks for pre-4.11
-        nt = t
-        if "#include <linux/version.h>" not in nt:
-            nt = "#include <linux/version.h>\n" + nt
-        # Replace common 4-arg getattr pattern if present without guard
-        nt2 = re.sub(
-            r"vfs_getattr\(([^,]+),\s*([^,]+),\s*STATX_[^,]*,\s*AT_STATX_[^)]*\)",
-            r"vfs_getattr(\1, \2)",
-            nt,
+# 5) selinux_inode is 5.1+ only - patch in file_wrapper.c and sucompat.c
+for p in list(ksu.rglob("*.c")):
+    t = read(p)
+    if "selinux_inode" not in t:
+        continue
+    # Check if already guarded
+    if "KERNEL_VERSION(5, 1, 0)" in t:
+        print(f"[=] selinux_inode already guarded: {p}")
+        continue
+    if "#include <linux/version.h>" not in t:
+        t = "#include <linux/version.h>\n" + t
+    pat = re.compile(r"([ \t]*)struct inode_security_struct \*([^=]+)= selinux_inode\(([^)]+)\);")
+    def repl_sel(m):
+        return (
+            f"{m.group(1)}#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)\n"
+            f"{m.group(1)}struct inode_security_struct *{m.group(2)}= selinux_inode({m.group(3)});\n"
+            f"{m.group(1)}#else\n"
+            f"{m.group(1)}struct inode_security_struct *{m.group(2)}=\n"
+            f"{m.group(1)}\t(struct inode_security_struct *){m.group(3)}->i_security;\n"
+            f"{m.group(1)}#endif"
         )
-        if nt2 != nt:
-            write(tt, nt2)
-            print(f"[+] vfs_getattr 4.9 fixed: {tt}")
-        else:
-            print(f"[=] vfs_getattr pattern not matched: {tt}")
+    nt, n = pat.subn(repl_sel, t)
+    if n:
+        write(p, nt)
+        print(f"[+] selinux_inode -> i_security for <5.1: {p} ({n})")
+    else:
+        print(f"[=] selinux_inode pattern not matched: {p}")
 
-# 6) core_hook: security_add_hooks 2-arg on 4.9
-ch = ksu / "core_hook.c"
-if ch.exists():
-    t = read(ch)
-    if "security_add_hooks" in t and "KERNEL_VERSION(4, 12, 0)" not in t:
-        nt = t
-        if "#include <linux/version.h>" not in nt:
-            nt = "#include <linux/version.h>\n" + nt
-        # security_add_hooks(hooks, ARRAY_SIZE(hooks), "ksu") -> 2-arg on <4.12
-        pat = re.compile(
-            r"security_add_hooks\(([^,]+),\s*([^,]+),\s*[^)]+\);"
+# 6) security_add_hooks: 2-arg on <4.12 (recursive search)
+for p in list(ksu.rglob("*.c")):
+    t = read(p)
+    if "security_add_hooks" not in t:
+        continue
+    if "KERNEL_VERSION(4, 12, 0)" in t or "KERNEL_VERSION(4,12,0)" in t:
+        print(f"[=] security_add_hooks already guarded: {p}")
+        continue
+    if "#include <linux/version.h>" not in t:
+        t = "#include <linux/version.h>\n" + t
+    pat = re.compile(
+        r"security_add_hooks\(([^,]+),\s*([^,]+),\s*[^)]+\);"
+    )
+    def repl_hooks(m):
+        return (
+            "#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)\n"
+            f"\tsecurity_add_hooks({m.group(1)}, {m.group(2)}, \"ksu\");\n"
+            "#else\n"
+            f"\tsecurity_add_hooks({m.group(1)}, {m.group(2)});\n"
+            "#endif"
         )
-        def repl(m):
-            return (
-                "#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)\n"
-                f"\tsecurity_add_hooks({m.group(1)}, {m.group(2)}, \"ksu\");\n"
-                "#else\n"
-                f"\tsecurity_add_hooks({m.group(1)}, {m.group(2)});\n"
-                "#endif"
-            )
-        nt2, n = pat.subn(repl, nt)
-        if n:
-            write(ch, nt2)
-            print(f"[+] security_add_hooks 2/3-arg fixed: {ch} ({n})")
-        else:
-            print(f"[=] security_add_hooks pattern miss: {ch}")
+    nt, n = pat.subn(repl_hooks, t)
+    if n:
+        write(p, nt)
+        print(f"[+] security_add_hooks 2/3-arg fixed: {p} ({n})")
 
-# 7) throne_comm: proc_ops -> file_operations on <5.6
-tc = ksu / "throne_comm.c"
-if tc.exists():
-    t = read(tc)
-    if "proc_ops" in t and "file_operations" not in t:
-        nt = t
-        if "#include <linux/version.h>" not in nt:
-            nt = "#include <linux/version.h>\n" + nt
-        nt = nt.replace("struct proc_ops", "struct file_operations")
-        nt = nt.replace(".proc_open", ".open")
-        nt = nt.replace(".proc_read", ".read")
-        nt = nt.replace(".proc_write", ".write")
-        nt = nt.replace(".proc_lseek", ".llseek")
-        nt = nt.replace(".proc_release", ".release")
-        write(tc, nt)
-        print(f"[+] proc_ops -> file_operations fixed: {tc}")
-
-# 8) kernel_read/write arg order for <4.14 (best-effort line fix)
-if kc.exists():
-    t = read(kc)
-    if "kernel_read" in t and "KERNEL_VERSION(4, 14, 0)" not in t:
-        # leave to full file restore below if needed
-        pass
+# 7) proc_ops -> file_operations on <5.6 (recursive search)
+for p in list(ksu.rglob("*.c")):
+    t = read(p)
+    if "proc_ops" not in t:
+        continue
+    if "file_operations" in t:
+        print(f"[=] already has file_operations: {p}")
+        continue
+    if "#include <linux/version.h>" not in t:
+        t = "#include <linux/version.h>\n" + t
+    nt = t.replace("struct proc_ops", "struct file_operations")
+    nt = nt.replace(".proc_open", ".open")
+    nt = nt.replace(".proc_read", ".read")
+    nt = nt.replace(".proc_write", ".write")
+    nt = nt.replace(".proc_lseek", ".llseek")
+    nt = nt.replace(".proc_release", ".release")
+    if nt != t:
+        write(p, nt)
+        print(f"[+] proc_ops -> file_operations fixed: {p}")
 
 print("[+] python 4.9 fixes applied")
 PY
 
+# Fix the typo in the Python script (selinux.h not in nt)
+sed -i 's/selinux.h not in nt/not in nt/' "$PATCH_PY" 2>/dev/null || true
+
+NEW_LAYOUT="false"
+if [ -d "$KSU_DIR/feature" ]; then
+  NEW_LAYOUT="true"
+fi
+export NEW_LAYOUT
+
 python3 "$PATCH_PY"
+
+# For new layout: skip v0.9.5 SELinux/kernel_compat replacement (already handled upstream)
+if [ "$NEW_LAYOUT" = "true" ]; then
+  echo "[*] New layout detected, skipping v0.9.5 source replacement (handled upstream)"
+
+  # Ensure drivers hook exists
+  if [ -f "$KDIR/drivers/Makefile" ] && ! grep -q 'kernelsu' "$KDIR/drivers/Makefile"; then
+    printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> "$KDIR/drivers/Makefile"
+    echo "[+] drivers/Makefile += kernelsu"
+  fi
+
+  if [ -f "$KDIR/drivers/Kconfig" ] && ! grep -q 'drivers/kernelsu/Kconfig' "$KDIR/drivers/Kconfig"; then
+    if grep -q '^endmenu' "$KDIR/drivers/Kconfig"; then
+      sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' "$KDIR/drivers/Kconfig"
+    else
+      echo 'source "drivers/kernelsu/Kconfig"' >> "$KDIR/drivers/Kconfig"
+    fi
+    echo "[+] drivers/Kconfig += kernelsu"
+  fi
+
+  echo "[+] 4.9 SukiSU compatibility patch done (new layout)"
+  exit 0
+fi
+
+# === Legacy layout patches below ===
 
 # 4) SukiSU v3.2.0 dropped pre-5.x SELinux compat; restore KernelSU v0.9.5 selinux tree
 SELINUX_DIR="$KSU_DIR/selinux"
@@ -234,35 +292,7 @@ else
   exit 1
 fi
 
-# 5) sucompat: selinux_inode is 5.1+ only
-python3 - <<'PY'
-from pathlib import Path
-import os
-p = Path(os.environ["KSU_DIR"]) / "sucompat.c"
-t = p.read_text(errors="ignore")
-old = "\tstruct inode_security_struct *sec = selinux_inode(inode);"
-new = """#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)
-\tstruct inode_security_struct *sec = selinux_inode(inode);
-#else
-\tstruct inode_security_struct *sec =
-\t\t(struct inode_security_struct *)inode->i_security;
-#endif"""
-if "inode->i_security" in t and "selinux_inode(inode)" not in t:
-    print("[=] sucompat already uses i_security path")
-elif old in t:
-    if "#include <linux/version.h>" not in t:
-        t = "#include <linux/version.h>\n" + t
-    p.write_text(t.replace(old, new))
-    print("[+] sucompat: selinux_inode -> i_security for <5.1")
-elif "selinux_inode(inode)" in t:
-    if "#include <linux/version.h>" not in t:
-        t = "#include <linux/version.h>\n" + t
-    t = t.replace(old if old in t else "struct inode_security_struct *sec = selinux_inode(inode);", new)
-    p.write_text(t)
-    print("[+] sucompat: selinux_inode patched (loose)")
-else:
-    print("[=] no selinux_inode in sucompat")
-PY
+# 5) sucompat: selinux_inode is 5.1+ only (handled by Python patcher above)
 
 # 6) kernel_compat from KernelSU v0.9.5 (4.9-safe nofault + HISI keyring)
 BASE_KSU="https://raw.githubusercontent.com/tiann/KernelSU/v0.9.5/kernel"
