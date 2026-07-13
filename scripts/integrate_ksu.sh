@@ -69,3 +69,6 @@ fi
 echo "[+] KernelSU/SukiSU 植入完成"
 ls -la KernelSU 2>/dev/null | head || true
 ls -la drivers/kernelsu 2>/dev/null | head || true
+
+# 4.9 兼容在 workflow 下一步 patch_sukisu_4.9.sh 处理
+
