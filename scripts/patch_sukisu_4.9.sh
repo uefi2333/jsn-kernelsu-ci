@@ -167,8 +167,7 @@ if pmc.exists():
     t = read(pmc)
     if "set_memory_ro" in t and "KSU_4_9_SETMEM" not in t:
         if "#include <linux/version.h>" not in t:
-            t = "#include <linux/version.h>
-" + t
+            t = "#include <linux/version.h>\n" + t
         # Add compat stubs before first function
         stub = """
 /* KSU_4_9_SETMEM: set_memory_ro/rw compat for kernel < 4.12 */
