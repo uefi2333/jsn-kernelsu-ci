@@ -260,6 +260,11 @@ jobs:
           set -euo pipefail
           bash builder/scripts/integrate_ksu.sh
 
+      - name: Patch SukiSU for Linux 4.9
+        run: |
+          set -euo pipefail
+          bash builder/scripts/patch_sukisu_4.9.sh
+
       - name: Apply manual hooks & path_umount
         if: env.KSU_HOOK == 'manual'
         run: |
