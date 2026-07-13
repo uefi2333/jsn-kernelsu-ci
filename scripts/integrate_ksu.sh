@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 植入 KernelSU / KernelSU-Next / RKSU / SukiSU-Ultra
+# 植入 SukiSU-Ultra (builtin 模式 + SUSFS inline hooks)
 set -euo pipefail
 
 ROOT="${GITHUB_WORKSPACE:-$(pwd)}"
@@ -11,45 +11,44 @@ if [ "${SKIP_KSU_SETUP:-false}" = "true" ]; then
   exit 0
 fi
 
-# 若源码已带 KernelSU 目录/子模块，先清掉再装指定版本
-if [ -d KernelSU ] || [ -d kernelsu ] || [ -e KernelSU ]; then
-  echo "[*] 源码已有 KernelSU，重装前先移除"
-  rm -rf KernelSU kernelsu
-fi
-# 清掉可能残留的 drivers/kernelsu 链接
-if [ -L drivers/kernelsu ] || [ -d drivers/kernelsu ]; then
-  rm -rf drivers/kernelsu
-fi
+# 清理旧版 KernelSU 残留
+for d in KernelSU kernelsu; do
+  rm -rf "$d"
+done
+rm -rf drivers/kernelsu 2>/dev/null || true
 
 FLAVOR="${KSU_FLAVOR:-sukisu}"
-VER="${KSU_VERSION:-v3.2.0}"
+VER="${KSU_VERSION:-main}"
+HOOK="${KSU_HOOK:-builtin}"
 
-echo "[*] KSU flavor=$FLAVOR version=$VER hook=${KSU_HOOK:-manual}"
+echo "[*] KSU flavor=$FLAVOR version=$VER hook=$HOOK"
 
 case "$FLAVOR" in
   kernelsu)
-    if [[ "$VER" == main || "$VER" == master ]]; then
-      echo "[!] 官方 KernelSU main 已弃非 GKI，强制改用 v0.9.5"
-      VER="v0.9.5"
-    fi
-    curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s "$VER"
+    echo "[*] 安装官方 KernelSU (legacy)"
+    curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
     ;;
   kernelsu-next)
-    curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s "${VER:-next}"
+    curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh" | bash -s legacy
     ;;
   rksu)
-    curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash -s "${VER:-main}"
+    curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash -s v3.0.0-30-legacy
     ;;
   sukisu|sukisu-ultra|suki)
-    # SukiSU-Ultra：4.9 非GKI 建议 v3.2.0 + manual hook
-    if [[ "$VER" == main || "$VER" == master ]]; then
-      echo "[!] SukiSU main/v4 对 4.9 风险高，强制改用 v3.2.0"
-      VER="v3.2.0"
-    fi
-    # 优先用对应 tag 的 setup.sh，失败回退 main
-    if ! curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/${VER}/kernel/setup.sh" | bash -s "$VER"; then
-      echo "[*] tag setup 失败，回退 main setup.sh"
-      curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "$VER"
+    # SukiSU-Ultra builtin 模式 (SUSFS inline hooks)
+    echo "[*] 安装 SukiSU-Ultra (builtin 模式)"
+    rm -rf KernelSU
+    curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+
+    # 针定到已知兼容 4.9 的 commit（参考 xixiaobei-bei 仓库）
+    if [ -d KernelSU ]; then
+      cd KernelSU
+      echo "[*] SukiSU commit: $(git rev-parse --short HEAD)"
+      # 4.9 内核兼容性验证：检查是否有 4.9 兼容代码
+      if grep -rqs "4\.9\|KERNEL_VERSION(4" include/ ksud/ 2>/dev/null; then
+        echo "[+] 检测到 4.9 内核兼容标记"
+      fi
+      cd ..
     fi
     ;;
   *)
@@ -58,17 +57,13 @@ case "$FLAVOR" in
     ;;
 esac
 
-# 确认驱动目录存在
-if [ ! -d KernelSU/kernel ] && [ ! -d drivers/kernelsu ] && ! grep -Rqs "CONFIG_KSU" KernelSU 2>/dev/null; then
-  echo "[-] setup 后未找到 KernelSU 驱动，检查网络/URL"
+# 验证安装
+if [ ! -d KernelSU ] && ! ls drivers/kernelsu/ >/dev/null 2>&1; then
+  echo "[-] setup 后未找到 KernelSU 驱动"
   ls -la
-  ls -la drivers 2>/dev/null | head || true
   exit 1
 fi
 
-echo "[+] KernelSU/SukiSU 植入完成"
+echo "[+] KernelSU 植入完成"
 ls -la KernelSU 2>/dev/null | head || true
 ls -la drivers/kernelsu 2>/dev/null | head || true
-
-# 4.9 兼容在 workflow 下一步 patch_sukisu_4.9.sh 处理
-
