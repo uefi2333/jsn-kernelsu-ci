@@ -107,31 +107,47 @@ if kc.exists():
         print("[+] kernel_compat.c: sched/task.h guarded")
 
 # 5) throne_tracker: vfs_getattr (4.11+ uses 4-arg with STATX_UID)
-# v3.2.0 already has: vfs_getattr(&path, &stat, STATX_UID, AT_STATX_SYNC_AS_STAT)
-# 4.9 only supports:  vfs_getattr(&path, &stat) — no STATX, no flags
+# v3.2.0 has: err = vfs_getattr(&path, &stat, STATX_UID, AT_STATX_SYNC_AS_STAT);
+# 4.9 only supports: vfs_getattr(&path, &stat) — no STATX, no flags
 tt = ksu / "throne_tracker.c"
 if tt.exists():
     t = read(tt)
     if "vfs_getattr" in t and "KSU_49_VFS_GETATTR" not in t:
-        # Add version.h if missing
         if "#include <linux/version.h>" not in t:
             t = "#include <linux/version.h>\n" + t
-        # Replace the exact v3.2.0 4-arg call with version-guarded code
-        old_call = "vfs_getattr(&path, &stat, STATX_UID, AT_STATX_SYNC_AS_STAT)"
-        new_call = (
-            "/* KSU_49_VFS_GETATTR */\n"
-            "#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)\n"
-            "\tvfs_getattr(&path, &stat, STATX_UID, AT_STATX_SYNC_AS_STAT)\n"
-            "#else\n"
-            "\tvfs_getattr(&path, &stat)\n"
-            "#endif"
+        # Replace the ENTIRE line (err = vfs_getattr(...);) to avoid splitting err= and ;
+        old_line = "\terr = vfs_getattr(&path, &stat, STATX_UID, AT_STATX_SYNC_AS_STAT);"
+        new_block_text = (
+            "\terr = /* KSU_49_VFS_GETATTR */\n"
+            "\t#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)\n"
+            "\tvfs_getattr(&path, &stat, STATX_UID, AT_STATX_SYNC_AS_STAT);\n"
+            "\t#else\n"
+            "\tvfs_getattr(&path, &stat);\n"
+            "\t#endif"
         )
-        nt = t.replace(old_call, new_call)
+        nt = t.replace(old_line, new_block_text)
         if nt != t:
             write(tt, nt)
-            print("[+] throne_tracker: vfs_getattr 4-arg -> version-guarded 2/4-arg")
+            print("[+] throne_tracker: vfs_getattr line replaced with version-guarded block")
         else:
-            print("[!] throne_tracker: vfs_getattr pattern not found, skip")
+            # Try without leading tab
+            old_line2 = "\terr = vfs_getattr(&path, &stat, STATX_UID, AT_STATX_SYNC_AS_STAT);"
+            print("[!] throne_tracker: exact line match failed, trying regex fallback")
+            import re
+            pat = re.compile(r'(\terr = )vfs_getattr\(&path, &stat, STATX_UID, AT_STATX_SYNC_AS_STAT\);')
+            def repl_fn(m):
+                return (m.group(1) + "/* KSU_49_VFS_GETATTR */\n"
+                        "\t#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)\n"
+                        "\tvfs_getattr(&path, &stat, STATX_UID, AT_STATX_SYNC_AS_STAT);\n"
+                        "\t#else\n"
+                        "\tvfs_getattr(&path, &stat);\n"
+                        "\t#endif")
+            nt, n = pat.subn(repl_fn, t)
+            if n:
+                write(tt, nt)
+                print(f"[+] throne_tracker: vfs_getattr regex-fallback fixed ({n})")
+            else:
+                print("[!] throne_tracker: all patterns failed")
 
 # 6) core_hook: security_add_hooks 2-arg on <4.12
 ch = ksu / "core_hook.c"
