@@ -153,7 +153,7 @@ for p in list(ksu.rglob("kernel_compat*.c")) + list(ksu.rglob("kernel_compat*.h"
             "#include <linux/sched.h>\n"
             "#endif",
         )
-        if "#include <linux/version.h>" not in selinux.h not in nt:
+        if "#include <linux/version.h>" not in t:
             nt = "#include <linux/version.h>\n" + nt
         write(p, nt)
         print(f"[+] sched/task.h fixed: {p}")
@@ -234,9 +234,6 @@ for p in list(ksu.rglob("*.c")):
 
 print("[+] python 4.9 fixes applied")
 PY
-
-# Fix the typo in the Python script (selinux.h not in nt)
-sed -i 's/selinux.h not in nt/not in nt/' "$PATCH_PY" 2>/dev/null || true
 
 NEW_LAYOUT="false"
 if [ -d "$KSU_DIR/feature" ]; then
