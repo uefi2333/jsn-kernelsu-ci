@@ -24,9 +24,12 @@ echo "[*] patch SukiSU for 4.9: $KSU_DIR"
 export KSU_DIR
 
 # Write python patcher to a file to avoid shell quoting hell
-PATCH_PY="$ROOT/builder/scripts/_patch_sukisu_4_9.py"
-if [ ! -d "$(dirname "$PATCH_PY")" ]; then
+if [ -d "$ROOT/builder/scripts" ]; then
+  PATCH_PY="$ROOT/builder/scripts/_patch_sukisu_4_9.py"
+elif [ -d "$ROOT/scripts" ]; then
   PATCH_PY="$ROOT/scripts/_patch_sukisu_4_9.py"
+else
+  PATCH_PY="/tmp/_patch_sukisu_4_9.py"
 fi
 mkdir -p "$(dirname "$PATCH_PY")"
 
@@ -94,17 +97,15 @@ for p in list(ksu.rglob("*.c")) + list(ksu.rglob("*.h")):
     print(f"[+] compiler_types.h -> compiler.h : {p}")
 
 # 3) task_stack.h / current_user_stack_pointer (4.9 has neither)
-# On arm64 4.9, user SP is in current_pt_regs()->sp (asm/ptrace.h / linux/ptrace.h)
 for p in list(ksu.rglob("*.c")) + list(ksu.rglob("*.h")):
     t = read(p)
     if "linux/sched/task_stack.h" not in t and "current_user_stack_pointer" not in t:
         continue
     orig = t
-    # replace include
     t = t.replace(
         "#include <linux/sched/task_stack.h>",
         "#include <linux/version.h>\n"
-        "#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0)\n"
+        "#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)\n"
         "#include <linux/ptrace.h>\n"
         "#include <asm/ptrace.h>\n"
         "#ifndef current_user_stack_pointer\n"
@@ -114,22 +115,6 @@ for p in list(ksu.rglob("*.c")) + list(ksu.rglob("*.h")):
         "#include <linux/sched/task_stack.h>\n"
         "#endif",
     )
-    # if include already gone but symbol remains, inject helper once near top
-    if "current_user_stack_pointer" in t and "current_pt_regs()->sp" not in t and "linux/sched/task_stack.h" not in orig:
-        inject = (
-            "#include <linux/version.h>\n"
-            "#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0)\n"
-            "#include <linux/ptrace.h>\n"
-            "#include <asm/ptrace.h>\n"
-            "#ifndef current_user_stack_pointer\n"
-            "#define current_user_stack_pointer() ((unsigned long)current_pt_regs()->sp)\n"
-            "#endif\n"
-            "#endif\n"
-        )
-        if "#include <linux/version.h>" in t:
-            t = t.replace("#include <linux/version.h>", "#include <linux/version.h>\n" + inject, 1)
-        else:
-            t = inject + t
     if t != orig:
         write(p, t)
         print(f"[+] task_stack / current_user_stack_pointer fixed: {p}")
@@ -157,20 +142,15 @@ for p in list(ksu.rglob("*.c")) + list(ksu.rglob("*.h")):
     t = read(p)
     if "vfs_getattr(" not in t:
         continue
-    # only touch 4-arg form with STATX
     if "STATX_UID" not in t and "AT_STATX_SYNC_AS_STAT" not in t:
-        # still may have 4-arg without macros
-        if re.search(r"vfs_getattr\([^;]+,[^;]+,[^;]+,[^;]+\)", t) is None:
-            continue
+        continue
     orig = t
-    # ensure version.h
     if "#include <linux/version.h>" not in t:
         if "#include <linux/fs.h>" in t:
             t = t.replace("#include <linux/fs.h>", "#include <linux/fs.h>\n#include <linux/version.h>", 1)
         else:
             t = "#include <linux/version.h>\n" + t
 
-    # replace common exact line used by throne_tracker
     t = t.replace(
         "err = vfs_getattr(&path, &stat, STATX_UID, AT_STATX_SYNC_AS_STAT);",
         "#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)\n"
@@ -179,56 +159,31 @@ for p in list(ksu.rglob("*.c")) + list(ksu.rglob("*.h")):
         "\terr = vfs_getattr(&path, &stat);\n"
         "#endif",
     )
-    # generic: vfs_getattr(a, b, c, d) -> guarded 2-arg for <4.11 if still present
-    def repl_vg(m):
-        full = m.group(0)
-        if "LINUX_VERSION_CODE" in full:
-            return full
-        args = m.group(1)
-        parts = [a.strip() for a in args.split(",")]
-        if len(parts) < 4:
-            return full
-        a, b = parts[0], parts[1]
-        return (
-            "({ LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0) ? "
-            f"vfs_getattr({args}) : vfs_getattr({a}, {b}); })"
-        )
 
-    # only apply generic if STATX still present after exact replace
+    # remaining STATX-style calls
     if "STATX_UID" in t or "AT_STATX_SYNC_AS_STAT" in t:
-        t2, n = re.subn(
-            r"vfs_getattr\(([^;]*STATX[^;]*)\)",
-            lambda m: (
-                f"vfs_getattr({m.group(1).split(',')[0].strip()}, {m.group(1).split(',')[1].strip()})"
-                if False else m.group(0)
-            ),
-            t,
-        )
-        # safer explicit fallback for remaining STATX calls
         t = re.sub(
-            r"([ \t]*)([a-zA-Z_][\w\s\*]*=\s*)?vfs_getattr\(([^;]+),\s*([^;]+),\s*STATX_[A-Z_]+,\s*AT_STATX_[A-Z_]+\);",
+            r"([ \t]*)(([a-zA-Z_][\w]*\s*=\s*)?)vfs_getattr\(([^,\n]+),\s*([^,\n]+),\s*STATX_[A-Z_]+,\s*AT_STATX_[A-Z_]+\);",
             lambda m: (
                 f"{m.group(1)}#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)\n"
-                f"{m.group(1)}{m.group(2) or ''}vfs_getattr({m.group(3)}, {m.group(4)}, STATX_UID, AT_STATX_SYNC_AS_STAT);\n"
+                f"{m.group(1)}{m.group(2) or ''}vfs_getattr({m.group(4)}, {m.group(5)}, STATX_UID, AT_STATX_SYNC_AS_STAT);\n"
                 f"{m.group(1)}#else\n"
-                f"{m.group(1)}{m.group(2) or ''}vfs_getattr({m.group(3)}, {m.group(4)});\n"
+                f"{m.group(1)}{m.group(2) or ''}vfs_getattr({m.group(4)}, {m.group(5)});\n"
                 f"{m.group(1)}#endif"
             ),
             t,
         )
+
     if t != orig:
         write(p, t)
         print(f"[+] vfs_getattr 4.9 fixed: {p}")
-
-# 6) copy_from_user_nofault may be missing; map to probe_kernel_read style if needed later
-# leave for next failure if any
 
 print("[+] python 4.9 fixes applied")
 PY
 
 python3 "$PATCH_PY"
 
-# 7) ensure drivers hook exists
+# ensure drivers hook exists
 if [ -f "$KDIR/drivers/Makefile" ] && ! grep -q 'kernelsu' "$KDIR/drivers/Makefile"; then
   printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> "$KDIR/drivers/Makefile"
   echo "[+] drivers/Makefile += kernelsu"
