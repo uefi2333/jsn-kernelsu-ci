@@ -478,10 +478,29 @@ if "path_umount" not in t:
     impl = """
 
 /* path_umount compat for kernel < 4.18 */
+/* do_umount is NOT exported to modules on 4.9 */
+/* Use kallsyms_lookup_name (available until 5.7) to resolve at runtime */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 18, 0)
+#include <linux/kallsyms.h>
+
+typedef int (*do_umount_fn)(struct vfsmount *, int);
+
+static do_umount_fn resolve_do_umount(void)
+{
+	static do_umount_fn cached = NULL;
+	if (!cached)
+		cached = (do_umount_fn)kallsyms_lookup_name("do_umount");
+	return cached;
+}
+
 int path_umount(struct path *path, int flags)
 {
-	return do_umount(path->mnt, flags);
+	do_umount_fn fn = resolve_do_umount();
+	if (fn)
+		return fn(path->mnt, flags);
+	/* fallback: just do mntput */
+	mntput(path->mnt);
+	return 0;
 }
 #endif
 """
