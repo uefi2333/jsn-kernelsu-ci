@@ -338,6 +338,65 @@ if [ -f "$KDIR/drivers/Kconfig" ] && ! grep -q 'drivers/kernelsu/Kconfig' "$KDIR
 fi
 
 
+# === 8b) core_hook.c: fix C99 for-loop ===
+CK="$KSU_DIR/core_hook.c"
+if [ -f "$CK" ]; then
+  echo "[*] patch core_hook.c: C99 for-loops"
+  python3 - <<'PYCK'
+import os, re
+from pathlib import Path
+ck = Path(os.environ["KSU_DIR"]) / "core_hook.c"
+t = ck.read_text(errors="ignore")
+pat = re.compile(r"for \((\w+) (\w+) = (\d+);")
+def fix_for(m):
+    typ, var, init = m.group(1), m.group(2), m.group(3)
+    return f"{typ} {var};\n    for ({var} = {init};"
+nt, n = pat.subn(fix_for, t)
+if n:
+    ck.write_text(nt)
+    print(f"[+] core_hook.c: C99 for-loops fixed ({n})")
+else:
+    print("[=] core_hook.c: no C99 for-loops found")
+PYCK
+fi
+
+# === 8c) kernel_compat: ensure ksu_strncpy_from_user_nofault exists ===
+KCH="$KSU_DIR/kernel_compat.c"
+if [ -f "$KCH" ]; then
+  if ! grep -q "ksu_strncpy_from_user_nofault" "$KCH"; then
+    echo "[*] Adding ksu_strncpy_from_user_nofault to kernel_compat.c"
+    cat >> "$KCH" <<'COMPATFN'
+
+/*
+ * 4.9 has no strncpy_from_user_nofault; use plain strncpy_from_user.
+ */
+long ksu_strncpy_from_user_nofault(char *dst, const void __user *unsafe_addr,
+                                   unsigned long count)
+{
+    long ret;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 3, 0)
+    ret = strncpy_from_user_nofault(dst, unsafe_addr, count);
+    if (likely(!ret))
+        return ret;
+#else
+    ret = strncpy_from_user(dst, unsafe_addr, count);
+    if (ret >= 0 && ret < count)
+        dst[ret] = '\0';
+#endif
+    return ret;
+}
+COMPATFN
+    echo "[+] kernel_compat.c: ksu_strncpy_from_user_nofault added"
+  fi
+fi
+
+# === 8d) sucompat.c: ensure ksu_strncpy_from_user_nofault is declared ===
+SUCH="$KSU_DIR/kernel_compat.h"
+if [ -f "$SUCH" ] && ! grep -q "ksu_strncpy_from_user_nofault" "$SUCH"; then
+  echo "extern long ksu_strncpy_from_user_nofault(char *dst, const void __user *unsafe_addr, unsigned long count);" >> "$SUCH"
+  echo "[+] kernel_compat.h: ksu_strncpy_from_user_nofault declared"
+fi
+
 # === 9) super_access.c: 4.9 compat (security member, C99 for-loops) ===
 SAC="$KSU_DIR/kpm/super_access.c"
 if [ -f "$SAC" ]; then
